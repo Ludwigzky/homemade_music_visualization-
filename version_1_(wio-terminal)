@@ -1,0 +1,133 @@
+//for arduino ide and wio terminal
+
+#include <TFT_eSPI.h>
+#undef min
+#undef max
+#include <vector>
+
+TFT_eSPI tft;
+
+//定义音符频率
+#define X 261.63  // Do
+#define Y 293.66  // Mi
+#define Z 329.63  // Sol
+
+// 矩形参数
+const int RECT_HEIGHT = 20;
+const int MOVE_SPEED = 90;    // 头部/整体的移动速度 像素/s
+const int FRAME_DELAY = 10;   // 帧延迟ms
+const uint16_t BG_COLOR = TFT_BLACK;
+
+// 按钮对应矩形固定y轴位置
+const int BUTTON_A_Y = 75;
+const int BUTTON_B_Y = 100;
+const int BUTTON_C_Y = 125;
+
+// 矩形结构体
+struct Rect {
+  float head_x;
+  float tail_x;
+  int y;
+  uint16_t color;
+  bool released;
+  int last_draw_x;
+  int last_draw_len;
+};
+
+std::vector<Rect> rects;
+
+// 按钮状态跟踪
+bool a_pressed = false;
+bool b_pressed = false;
+bool c_pressed = false;
+
+void setup() {
+  Serial.begin(115200);
+
+  tft.begin();
+  tft.setRotation(3);
+  tft.fillScreen(BG_COLOR);
+
+  pinMode(WIO_KEY_A, INPUT_PULLUP);
+  pinMode(WIO_KEY_B, INPUT_PULLUP);
+  pinMode(WIO_KEY_C, INPUT_PULLUP);
+  
+  //初始化蜂鸣器引脚
+  // 虽然tone()会自动设置，但这是一个好习惯
+  pinMode(WIO_BUZZER, OUTPUT);
+}
+
+void loop() {
+  //按钮处理逻辑 (传入音符参数) 
+  handle_button(WIO_KEY_A, a_pressed, BUTTON_A_Y, TFT_PINK, X);
+  handle_button(WIO_KEY_B, b_pressed, BUTTON_B_Y, TFT_PINK, Y);
+  handle_button(WIO_KEY_C, c_pressed, BUTTON_C_Y, TFT_PINK, Z);
+
+  //更新和绘制所有矩形
+  float deltaX = MOVE_SPEED * (FRAME_DELAY / 1000.0);
+  for (int i = rects.size() - 1; i >= 0; i--) {
+    Rect &r = rects[i];
+    tft.fillRect(r.last_draw_x, r.y, r.last_draw_len, RECT_HEIGHT, BG_COLOR);
+    if (!r.released) {
+      r.tail_x = 0;
+      r.head_x += deltaX;
+    } else {
+      r.head_x += deltaX;
+      r.tail_x += deltaX;
+    }
+    int current_draw_x = (int)r.tail_x;
+    int current_draw_len = (int)r.head_x - (int)r.tail_x;
+    if (current_draw_len > 0) {
+      tft.fillRect(current_draw_x, r.y, current_draw_len, RECT_HEIGHT, r.color);
+    }
+    r.last_draw_x = current_draw_x;
+    r.last_draw_len = current_draw_len;
+    if (r.tail_x > tft.width()) {
+      rects.erase(rects.begin() + i);
+    }
+  }
+
+  delay(FRAME_DELAY);
+}
+
+/**
+ * @brief 处理单个按钮的按下和释放逻辑，并控制音效
+ * @param pin 按钮引脚
+ * @param pressed_flag 对应按钮的按压状态标志位 (引用传递)
+ * @param y_pos 矩形的Y坐标
+ * @param color 矩形的颜色
+ * @param note  按下时要播放的音符频率
+ */
+void handle_button(int pin, bool &pressed_flag, int y_pos, uint16_t color, int note) {
+  if (digitalRead(pin) == LOW) {
+    // 按钮被按下
+    if (!pressed_flag) {
+      pressed_flag = true;
+      // 创建新的矩形
+      Rect new_rect = {0.0, 0.0, y_pos, color, false, 0, 0};
+      rects.push_back(new_rect);
+      
+      // --- 新增：开始播放声音 ---
+      tone(WIO_BUZZER, note);
+    }
+  } else {
+    // 按钮被释放
+    if (pressed_flag) {
+      pressed_flag = false;
+      // 标记矩形为“已释放”
+      for (int i = rects.size() - 1; i >= 0; i--) {
+        if (rects[i].y == y_pos && !rects[i].released) {
+          rects[i].released = true;
+          break;
+        }
+      }
+      
+      // --- 新增：停止播放声音 ---
+      // 为了防止快速切换按键时声音被错误关闭，
+      // 只有当所有按钮都松开时才停止声音。
+      if (digitalRead(WIO_KEY_A) == HIGH && digitalRead(WIO_KEY_B) == HIGH && digitalRead(WIO_KEY_C) == HIGH) {
+        noTone(WIO_BUZZER);
+      }
+    }
+  }
+}
