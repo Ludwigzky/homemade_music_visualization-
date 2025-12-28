@@ -1,0 +1,110 @@
+import mido
+import serial
+import time
+
+# --- 配置部分 (与上一版相同) ---
+# 1. 列出你两个Wio Terminal的串口号
+AVAILABLE_PORTS = ['COM22', 'COM17'] 
+
+# 2. 设置串口通信波特率
+BAUD_RATE = 115200
+
+# 3. 设置覆盖两个设备总音域的参数
+#    最低音是D2 (MIDI 38)，以此为基准
+MIDI_NOTE_TO_INDEX_OFFSET = 36
+
+# 4. 总音符数是从D2(38)到D6(86)，共49个半音
+NUM_SUPPORTED_NOTES = 60
+
+# --- 函数定义 (无需修改) ---
+def note_to_index(note_number):
+    """
+    将一个绝对的MIDI音高编号转换为我们程序内部使用的、从0开始的索引。
+    """
+    index = note_number - MIDI_NOTE_TO_INDEX_OFFSET
+    if 0 <= index < NUM_SUPPORTED_NOTES:
+        return index
+    return None
+
+# --- 主程序 ---
+if __name__ == "__main__":
+    serial_connections = {}
+    
+    try:
+        # (加载和分配逻辑无需修改)
+        midi_filename = input("请输入要播放的MIDI文件名: ")
+        mid = mido.MidiFile(midi_filename)
+        print(f"加载MIDI文件: '{midi_filename}', 包含 {len(mid.tracks)} 个原始轨道。")
+
+        channel_to_port_map = {}
+        available_ports_iterator = iter(AVAILABLE_PORTS)
+        
+        for i, track in enumerate(mid.tracks):
+            if any(msg.type == 'note_on' and msg.velocity > 0 for msg in track):
+                first_note_channel = None
+                for msg in track:
+                    if not msg.is_meta and hasattr(msg, 'channel'):
+                        first_note_channel = msg.channel
+                        break
+                
+                if first_note_channel is not None:
+                    try:
+                        port = next(available_ports_iterator)
+                        channel_to_port_map[first_note_channel] = port
+                        print(f"设备 {port} 将演奏 Channel {first_note_channel} (来自轨道 {i} '{track.name}')")
+                    except StopIteration:
+                        print(f"警告：没有更多可用设备来分配给轨道 {i}。")
+
+        for port in channel_to_port_map.values():
+            print(f"正在连接到 {port}...")
+            ser = serial.Serial(port, BAUD_RATE, timeout=1)
+            time.sleep(2)
+            serial_connections[port] = ser
+            print(f"{port} 连接成功。")
+
+        if not serial_connections:
+            print("没有可用的设备或音符轨道，程序退出。")
+            exit()
+
+        input("所有设备连接完毕，按回车键开始同步播放...")
+
+        # --- 使用 mid.play() 进行同步播放和分发 ---
+        print("\n--- 开始播放 ---")
+        for msg in mid.play():
+            # (前置检查逻辑无需修改)
+            if msg.is_meta:
+                continue
+            
+            if not hasattr(msg, 'channel') or msg.channel not in channel_to_port_map:
+                continue
+            
+            port = channel_to_port_map[msg.channel]
+            ser = serial_connections[port]
+            
+            if not hasattr(msg, 'note'):
+                continue
+
+            index = note_to_index(msg.note)
+            if index is None: continue
+
+            # --- 核心修正：将 'on'/'off' 改回 'note_on'/'note_off' ---
+            if msg.type == 'note_on' and msg.velocity > 0:
+                data_to_send = index.to_bytes(1, 'little')
+                ser.write(data_to_send)
+                print(f"[{port}]: 发送 {index} (按下 {msg.note} on Ch{msg.channel})")
+
+            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                data_to_send = (index + 100).to_bytes(1, 'little')
+                ser.write(data_to_send)
+                print(f"[{port}]: 发送 {index + 100} (松开 {msg.note} on Ch{msg.channel})")
+
+        print("\n--- 播放完成 ---")
+
+    except Exception as e:
+        print(f"主程序发生错误: {e}")
+    finally:
+        # (关闭串口逻辑无需修改)
+        for ser in serial_connections.values():
+            if ser and ser.is_open:
+                ser.close()
+                print(f"串口 {ser.port} 已关闭。")
