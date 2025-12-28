@@ -1,0 +1,147 @@
+/*
+ * Wio Terminal - FULL RANGE (C2 to B6) - tone() Version
+ * This version uses the standard tone() function, which is compatible with
+ * the default Wio Terminal (SAMD51) board configuration in Arduino IDE.
+ * NOTE: Very low frequencies (like C2) might sound weak or slightly off
+ * due to the physical limitations of the buzzer and the tone() implementation.
+ */
+
+#include <TFT_eSPI.h>
+#undef min
+#undef max
+#include <vector>
+#include <map>
+
+// TFT screen object
+TFT_eSPI tft;
+
+// --- Device-Specific Configuration (C2 to B6) ---
+const int notes[] = {
+  // Octave 2 (C2-B2)
+  65, 69, 73, 78, 82, 87, 92, 98, 104, 110, 117, 123,
+  // Octave 3 (C3-B3)
+  131, 139, 147, 156, 165, 175, 185, 196, 208, 220, 233, 247,
+  // Octave 4 (C4-B4)
+  262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494,
+  // Octave 5 (C5-B5)
+  523, 554, 587, 622, 659, 698, 740, 784, 831, 880, 932, 988,
+  // Octave 6 (C6-B6)
+  1047, 1109, 1175, 1245, 1319, 1397, 1480, 1568, 1661, 1760, 1865, 1976
+};
+const int NUM_NOTES = sizeof(notes) / sizeof(int); // 60
+
+// Visual and animation parameters
+const int RECT_HEIGHT = 3;
+const int RECT_Y_SPACING = 1;
+const int MOVE_SPEED = 60;
+const int FRAME_DELAY = 10;
+const uint16_t BG_COLOR = TFT_BLACK;
+
+// Rectangle data structure
+struct Rect {
+  float head_x, tail_x;
+  int y;
+  uint16_t color;
+  bool released;
+  int last_draw_x, last_draw_len;
+};
+std::vector<Rect> rects;
+
+// Map to track the state of each note index
+std::map<int, bool> key_states;
+
+// --- setup() function: runs once at startup ---
+void setup() {
+  Serial.begin(115200);
+  tft.begin();
+  tft.setRotation(3);
+  tft.fillScreen(BG_COLOR);
+  
+  // --- CORE FIX: Revert to using pinMode for the buzzer ---
+  pinMode(WIO_BUZZER, OUTPUT);
+
+  // Initialize all key states to false
+  for (int i = 0; i < NUM_NOTES; ++i) {
+    key_states[i] = false;
+  }
+}
+
+// --- loop() function: runs repeatedly (unchanged) ---
+void loop() {
+  while (Serial.available() > 0) {
+    int received_byte = Serial.read();
+    handle_serial_input(received_byte);
+  }
+  
+  float deltaX = MOVE_SPEED * (FRAME_DELAY / 1000.0);
+  for (int i = rects.size() - 1; i >= 0; i--) {
+    Rect &r = rects[i];
+    tft.fillRect(r.last_draw_x, r.y, r.last_draw_len, RECT_HEIGHT, BG_COLOR);
+    
+    if (!r.released) {
+      r.tail_x = 0;
+      r.head_x += deltaX;
+    } else {
+      r.head_x += deltaX;
+      r.tail_x += deltaX;
+    }
+    
+    int current_draw_x = (int)r.tail_x;
+    int current_draw_len = (int)r.head_x - (int)r.tail_x;
+    if (current_draw_len > 0) {
+      tft.fillRect(current_draw_x, r.y, current_draw_len, RECT_HEIGHT, r.color);
+    }
+    
+    r.last_draw_x = current_draw_x;
+    r.last_draw_len = current_draw_len;
+    
+    if (r.tail_x > tft.width()) {
+      rects.erase(rects.begin() + i);
+    }
+  }
+  delay(FRAME_DELAY);
+}
+
+// --- handle_serial_input() function: processes incoming byte commands ---
+void handle_serial_input(int input_byte) {
+  if (input_byte == -1) return;
+
+  bool is_press_event = (input_byte < 100);
+  int key_index = is_press_event ? input_byte : (input_byte - 100);
+
+  if (key_index < 0 || key_index >= NUM_NOTES) return;
+
+  int note_frequency = notes[key_index];
+  int y_pos = key_index * (RECT_HEIGHT + RECT_Y_SPACING);
+  uint16_t color = TFT_PINK;
+
+  if (is_press_event) {
+    if (!key_states[key_index]) {
+      key_states[key_index] = true;
+      // The Rect initializer should match the struct definition
+      Rect new_rect = {0.0, 0.0, y_pos, color, false, 0, 0};
+      rects.push_back(new_rect);
+      
+      // --- CORE FIX: Revert to using tone() ---
+      tone(WIO_BUZZER, note_frequency);
+    }
+  } else {
+    if (key_states[key_index]) {
+      key_states[key_index] = false;
+      for (int i = rects.size() - 1; i >= 0; i--) {
+        if (rects[i].y == y_pos && !rects[i].released) {
+          rects[i].released = true;
+          break;
+        }
+      }
+      bool all_keys_up = true;
+      for(auto const& [key, val] : key_states) {
+        if (val) { all_keys_up = false; break; }
+      }
+      if (all_keys_up) {
+        // --- CORE FIX: Revert to using noTone() ---
+        noTone(WIO_BUZZER);
+      }
+    }
+  }
+}
