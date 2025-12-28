@@ -1,0 +1,61 @@
+import serial
+import time
+import keyboard
+SERIAL_PORT = 'COM22' 
+BAUD_RATE = 115200
+KEY_MAPPING = {
+    'q': 'a', '2': 'b', 'w': 'c', '3': 'd', 'e': 'e', 'r': 'f',
+    '5': 'g', 't': 'h', '6': 'i', 'y': 'j', '7': 'k', 'u': 'l',
+    'z': 'm', 's': 'n', 'x': 'o', 'd': 'p', 'c': 'q', 'v': 'r',
+    'g': 's', 'b': 't', 'h': 'u', 'n': 'v', 'j': 'w', 'm': 'x'
+}
+# 存储当前按下的按键，防止重复发送
+pressed_keys = set()
+try:
+    # 初始化串口连接
+    print(f"正在连接到 {SERIAL_PORT}...")
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2) # 等串口稳定
+    print("连接成功！请开始按键...")
+    while True:
+        # 循环检查所有自定义的按键
+        for key, char_to_send in KEY_MAPPING.items():
+            
+            # 检测按键是否被按下
+            if keyboard.is_pressed(key):
+                if key not in pressed_keys:
+                    # 新按键，发送“按下”信号 (大写字符)
+                    message = char_to_send.upper()
+                    ser.write(message.encode('ascii'))
+                    print(f"发送: {message} (按下 {key})")
+                    pressed_keys.add(key)
+            
+            # 检测按键是否已松开
+            elif key in pressed_keys:
+                # 之前按下的键松开了，发送“松开”信号 (小写字符)
+                message = char_to_send.lower()
+                ser.write(message.encode('ascii'))
+                print(f"发送: {message} (松开 {key})")
+                pressed_keys.remove(key)
+        
+        time.sleep(0.01) # 短暂休眠，降低CPU占用
+
+except serial.SerialException as e:
+    print(f"串口错误: {e}")
+    print("请检查：")
+    print("1. Wio Terminal是否已连接？")
+    print(f"2. 串口号 '{SERIAL_PORT}' 是否正确？")
+    print("3. Arduino IDE的串口监视器是否已关闭？(它会占用端口)")
+
+except ImportError:
+    print("错误：需要安装 'pyserial' 和 'keyboard' 库。")
+    print("请在终端运行: pip install pyserial keyboard")
+    
+except Exception as e:
+    print(f"发生未知错误: {e}")
+
+finally:
+    if 'ser' in locals() and ser.is_open:
+        ser.close()
+    print("程序结束。")
+
