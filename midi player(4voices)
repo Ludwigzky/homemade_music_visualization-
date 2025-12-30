@@ -1,0 +1,105 @@
+#include <Arduino.h>
+
+// --- 配置区域 ---
+// 定义四个蜂鸣器连接的GPIO引脚
+// 注意：D1, D2, D3, D4 是特定开发板的引脚定义，请确保您的开发板定义中包含这些
+const int BUZZER_PINS[4] = {D1, D2, D3, D4};
+
+// 定义MIDI音高到频率转换的查找表 (C2 to B6)
+const float noteFrequencies[] = {
+  65.41, 69.30, 73.42, 77.78, 82.41, 87.31, 92.50, 98.00, 103.83, 110.00, 116.54, 123.47, // C2-B2
+  130.81, 138.59, 146.83, 155.56, 164.81, 174.61, 185.00, 196.00, 207.65, 220.00, 233.08, 246.94, // C3-B3
+  261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88, // C4-B4
+  523.25, 554.37, 587.33, 622.25, 659.26, 698.46, 739.99, 783.99, 830.61, 880.00, 932.33, 987.77, // C5-B5
+  1046.50, 1108.73, 1174.66, 1244.51, 1318.51, 1396.91, 1479.98, 1567.98, 1661.22, 1760.00, 1864.66, 1975.53 // C6-B6
+};
+const int MIDI_NOTE_OFFSET = 36; // 我们的频率表是从MIDI音符36 (C2)开始的
+
+// --- MIDI解析状态机 ---
+byte command;
+byte note;
+byte velocity;
+int midi_state = 0; // 0: 等待命令, 1: 等待音符, 2: 等待力度
+
+// --- 函数定义 ---
+
+// 将MIDI音符编号转换为频率
+float midiToFrequency(byte midiNote) {
+  if (midiNote >= 36 && midiNote <= 95) {
+    return noteFrequencies[midiNote - MIDI_NOTE_OFFSET];
+  }
+  return 0; // 超出范围则返回0Hz (不发声)
+}
+
+// 处理MIDI Note On事件
+void handleNoteOn(byte channel, byte midiNote, byte vel) {
+  if (vel > 0) { // 真正的 Note On
+    if (channel < 4) { // 我们只处理前4个通道 (0-3)
+      float freq = midiToFrequency(midiNote);
+      if (freq > 0) {
+        int pin = BUZZER_PINS[channel];
+        // 在 ESP32 3.x 中，ledcWriteTone 会自动处理通道分配
+        // 它会将指定引脚设置为 50% 占空比的指定频率
+        ledcWriteTone(pin, freq);
+        Serial.printf("Track %d (Pin %d): Note ON, Note: %d, Freq: %.2f Hz\n", channel, pin, midiNote, freq);
+      }
+    }
+  } else { // velocity == 0 实际上是 Note Off
+    handleNoteOff(channel, midiNote);
+  }
+}
+
+// 处理MIDI Note Off事件
+void handleNoteOff(byte channel, byte midiNote) {
+  if (channel < 4) {
+    int pin = BUZZER_PINS[channel];
+    // 频率设为 0 即可停止发声
+    ledcWriteTone(pin, 0);
+    Serial.printf("Track %d (Pin %d): Note OFF, Note: %d\n", channel, pin, midiNote);
+  }
+}
+
+void setup() {
+  // 启动串口
+  Serial.begin(115200);
+  Serial.println("MIDI Player Ready (ESP32 Core v3.x API). Waiting for data...");
+
+  // 初始化4个引脚
+  for (int i = 0; i < 4; i++) {
+    // 在 ESP32 3.x 中，使用 ledcAttach 代替 ledcSetup 和 ledcAttachPin
+    // 参数：引脚, 频率, 分辨率
+    // 对于蜂鸣器，初始频率可设为 1000，分辨率 10 位
+    ledcAttach(BUZZER_PINS[i], 1000, 10);
+    // 初始状态不发声
+    ledcWriteTone(BUZZER_PINS[i], 0);
+  }
+}
+
+void loop() {
+  // 串口数据解析部分
+  while (Serial.available()) {
+    byte data = Serial.read();
+
+    if (data >= 0x80) { // 是状态字节 (命令)
+      command = data;
+      midi_state = 1; // 下一个字节应该是音符
+    } else { // 是数据字节
+      if (midi_state == 1) {
+        note = data;
+        midi_state = 2; // 下一个字节应该是力度
+      } else if (midi_state == 2) {
+        velocity = data;
+        midi_state = 0; // 完成一个三字节消息的接收
+
+        byte cmd_type = command & 0xF0;
+        byte channel = command & 0x0F;
+
+        if (cmd_type == 0x90) { // Note On
+          handleNoteOn(channel, note, velocity);
+        } else if (cmd_type == 0x80) { // Note Off
+          handleNoteOff(channel, note);
+        }
+      }
+    }
+  }
+}
