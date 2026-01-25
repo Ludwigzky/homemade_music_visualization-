@@ -1,0 +1,156 @@
+import mido
+import serial
+import serial.tools.list_ports
+import time
+
+BAUD_RATE = 115200
+MAX_VOICES = 4
+
+
+def select_ports(required_count):
+    ports = list(serial.tools.list_ports.comports())
+    if len(ports) < required_count:
+        raise RuntimeError(f"可用串口数量不足，需要 {required_count} 个")
+
+    print("--- 可用串口 ---")
+    for i, p in enumerate(ports):
+        print(f"{i}: {p.device} - {p.description}")
+
+    raw = input(f"请输入 {required_count} 个串口编号（空格分隔，例如：0 1 2 3）: ")
+    idxs = list(map(int, raw.split()))
+    if len(idxs) != required_count:
+        raise ValueError("串口编号数量不匹配")
+    for i in idxs:
+        if i < 0 or i >= len(ports):
+            raise IndexError(f"串口编号 {i} 不存在")
+
+    return [ports[i].device for i in idxs]
+
+
+def extract_tracks(mid):
+    tracks = []
+    for tr in mid.tracks:
+        if any(not msg.is_meta for msg in tr):
+            tracks.append(tr)
+        if len(tracks) == MAX_VOICES:
+            break
+    return tracks
+
+
+def build_absolute_tracks(tracks):
+    """
+    构建绝对时间消息列表，每条消息用字典存储：
+    {'msg': mido.Message, 'abs_time': 绝对时间ticks}
+    """
+    abs_tracks = []
+    for track in tracks:
+        abs_time = 0
+        msgs = []
+        for msg in track:
+            abs_time += msg.time
+            if not msg.is_meta and msg.type in ('note_on', 'note_off'):
+                msgs.append({
+                    'msg': msg.copy(),
+                    'abs_time': abs_time
+                })
+        abs_tracks.append(msgs)
+    return abs_tracks
+
+
+def single_noteize(track_msgs):
+    """
+    对单个声部做单音化：每个时间点只保留一个音符
+    策略：优先保留最后出现的 Note On，Note Off 直接保留
+    """
+    active_note = None
+    result = []
+    for msg_info in track_msgs:
+        msg = msg_info['msg']
+        if msg.type == 'note_on' and msg.velocity > 0:
+            # 新的 Note On 覆盖前一个
+            active_note = msg.note
+            new_msg = msg.copy()
+            new_msg.note = active_note
+            result.append({'msg': new_msg, 'abs_time': msg_info['abs_time']})
+        elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+            if active_note == msg.note:
+                result.append(msg_info)
+                active_note = None
+        else:
+            result.append(msg_info)
+    return result
+
+
+def main():
+    midi_path = input("请输入 MIDI 文件路径: ")
+    mid = mido.MidiFile(midi_path)
+
+    tracks = extract_tracks(mid)
+    voice_count = len(tracks)
+    if voice_count == 0:
+        raise RuntimeError("MIDI 文件中未找到有效音轨")
+
+    print(f"检测到 {voice_count} 个有效音轨，将使用 {voice_count} 个串口")
+
+    port_names = select_ports(voice_count)
+    sers = []
+    for p in port_names:
+        try:
+            sers.append(serial.Serial(p, BAUD_RATE, timeout=0))
+        except serial.SerialException as e:
+            raise RuntimeError(f"无法打开串口 {p}: {e}")
+    time.sleep(2)  # 等待 ESP32 复位完成
+
+    # 构建绝对时间消息列表
+    abs_tracks = build_absolute_tracks(tracks)
+    # 单音化处理
+    abs_tracks = [single_noteize(t) for t in abs_tracks]
+
+    # 为每个 track 创建索引
+    track_indices = [0] * voice_count
+    # 当前播放时间（秒）
+    start_time = time.time()
+    current_time = 0
+
+    print("开始播放...\n")
+
+    while True:
+        # 检查是否所有 track 都播放完
+        finished = True
+        for i in range(voice_count):
+            if track_indices[i] < len(abs_tracks[i]):
+                finished = False
+                break
+        if finished:
+            break
+
+        current_time = time.time() - start_time
+
+        # 遍历每个 track，发送对应时间的消息
+        for i in range(voice_count):
+            idx = track_indices[i]
+            if idx >= len(abs_tracks[i]):
+                continue
+            msg_info = abs_tracks[i][idx]
+            msg = msg_info['msg']
+            abs_time = msg_info['abs_time']
+
+            # mido 的 abs_time 是 ticks，转换为秒需要 tempo
+            # 这里假设 mid.ticks_per_beat 和 120 bpm (500000us per beat) 做默认近似
+            seconds_per_tick = 0.5 / mid.ticks_per_beat  # 0.5秒/节拍, 120bpm
+            if abs_time * seconds_per_tick <= current_time:
+                if msg.type == 'note_on' and msg.velocity > 0:
+                    status = 0x90
+                else:
+                    status = 0x80
+                data = bytes([status, msg.note, msg.velocity])
+                sers[i].write(data)
+                track_indices[i] += 1
+
+        time.sleep(0.001)  # 防止 CPU 占用过高
+
+    print("播放结束")
+
+
+if __name__ == "__main__":
+    main()
